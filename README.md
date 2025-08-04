@@ -4,7 +4,7 @@ A modern, secure web interface for downloading videos from YouTube and other soc
 
 ## 🐧 Linux Quick Start
 
-### 1. Install FFmpeg
+### 1. Install FFmpeg (for thumbnail generation)
 ```bash
 sudo apt-get install ffmpeg
 ```
@@ -32,6 +32,17 @@ npm install -g pm2
 npm run build
 pm2 start ecosystem.config.js
 ```
+
+### 5. Access the Application
+```bash
+# Get your IP address
+ip addr show
+
+# Access the application in your browser
+http://YOUR_IP_ADDRESS:3044
+```
+
+**Note:** Replace `YOUR_IP_ADDRESS` with your actual server IP address. The application runs on port 3044 by default.
 
 ## 🚀 Features
 
