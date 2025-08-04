@@ -30,6 +30,23 @@ sudo apt install yt-dlp
 npm install
 npm install -g pm2
 npm run build
+```
+
+### 4.1. Authentication Setup
+**Default credentials:**
+- **Username:** `admin`
+- **Password:** `admin123`
+
+**To change username and password:**
+Edit the `src/app/auth.json` file:
+```json
+{
+  "username": "your-new-username",
+  "password": "your-new-password"
+}
+```
+
+```bash
 pm2 start ecosystem.config.js
 ```
 
