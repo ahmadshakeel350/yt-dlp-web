@@ -46,6 +46,7 @@ public/downloads/*
 public/thumbnails/*
 !public/thumbnails/.gitkeep
 
-# Log files
-logs/*
-!logs/.gitkeep
+# Job queue data
+data/jobs/*
+!data/jobs/.gitkeep
+

@@ -40,9 +40,11 @@ export async function GET(request) {
           size: stats.size,
           sizeFormatted: formatFileSize(stats.size),
           modified: stats.mtime.toISOString(),
-          url: `/api/files/download/${encodeURIComponent(file)}`,
+          url: `/api/files/download/${file.split("/").map(encodeURIComponent).join("/")}`,
           hasThumbnail,
-          thumbnailUrl: hasThumbnail ? `/api/files/thumbnail/${encodeURIComponent(thumbnailName)}` : null
+          thumbnailUrl: hasThumbnail
+            ? `/api/files/thumbnail/${thumbnailName.split("/").map(encodeURIComponent).join("/")}`
+            : null
         }
       })
       .sort((a, b) => new Date(b.modified) - new Date(a.modified)) // Sort by modification date (newest first)

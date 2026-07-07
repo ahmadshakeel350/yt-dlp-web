@@ -1,14 +1,13 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
-import { Download, Play, Settings, Info, Square, FileDown, RefreshCw, LogOut, Search, X, ChevronDown, ChevronUp, Trash2, AlertTriangle } from "lucide-react"
+import { Download, Info, Square, FileDown, RefreshCw, LogOut, Search, X, ChevronDown, ChevronUp, Trash2, AlertTriangle, ListOrdered, Clock, CheckCircle2, XCircle, Loader2 } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 
 export default function Home() {
@@ -16,10 +15,9 @@ export default function Home() {
   const [selectedFormat, setSelectedFormat] = useState("")
   const [downloadPath, setDownloadPath] = useState("")
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false)
-  const [isDownloading, setIsDownloading] = useState(false)
-  const [progress, setProgress] = useState(0)
-  const [status, setStatus] = useState("")
-  const [logs, setLogs] = useState([])
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [queue, setQueue] = useState([])
+  const [expandedJobId, setExpandedJobId] = useState(null)
   const [error, setError] = useState("")
   const [files, setFiles] = useState([])
   const [isLoadingFiles, setIsLoadingFiles] = useState(false)
@@ -29,13 +27,52 @@ export default function Home() {
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [fileToDelete, setFileToDelete] = useState(null)
   const [isDeleting, setIsDeleting] = useState(false)
-  const abortControllerRef = useRef(null)
+  const [downloadingFile, setDownloadingFile] = useState(null)
   const router = useRouter()
+  const prevCompletedRef = useRef(0)
 
-  // Load files on component mount and after downloads
+  const activeJobs = queue.filter((j) =>
+    ["queued", "downloading", "processing"].includes(j.status)
+  )
+
+  const loadQueue = async () => {
+    try {
+      const response = await fetch("/api/download/queue")
+      const data = await response.json()
+      setQueue(data.jobs || [])
+    } catch (err) {
+      console.error("Failed to load queue:", err)
+    }
+  }
+
+  // Load files and queue on mount; poll queue while jobs are active
   useEffect(() => {
     loadFiles()
+    loadQueue()
   }, [])
+
+  useEffect(() => {
+    if (activeJobs.length === 0) return
+
+    const interval = setInterval(async () => {
+      try {
+        const response = await fetch("/api/download/queue")
+        const data = await response.json()
+        const jobs = data.jobs || []
+        const completedCount = jobs.filter((j) => j.status === "completed").length
+
+        if (completedCount > prevCompletedRef.current) {
+          loadFiles()
+        }
+        prevCompletedRef.current = completedCount
+        setQueue(jobs)
+      } catch (err) {
+        console.error("Failed to poll queue:", err)
+      }
+    }, 2000)
+
+    return () => clearInterval(interval)
+  }, [activeJobs.length])
 
   const loadFiles = async () => {
     setIsLoadingFiles(true)
@@ -132,94 +169,116 @@ export default function Home() {
     }
   }
 
+  const handleFileDownload = async (file) => {
+    setDownloadingFile(file.name)
+    setError("")
+
+    try {
+      const response = await fetch(file.url)
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.error || "Download failed")
+      }
+
+      const blob = await response.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const link = document.createElement("a")
+      link.href = objectUrl
+      link.download = file.name
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(objectUrl)
+    } catch (err) {
+      setError(err.message || "Failed to download file")
+    } finally {
+      setDownloadingFile(null)
+    }
+  }
+
   const handleDownload = async () => {
     if (!url.trim()) {
       setError("Please enter a valid URL")
       return
     }
 
-    setIsDownloading(true)
-    setProgress(0)
-    setStatus("Starting download...")
+    setIsSubmitting(true)
     setError("")
-    setLogs([])
-
-    // Create new AbortController for this download
-    abortControllerRef.current = new AbortController()
 
     try {
       const response = await fetch("/api/download", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url: url.trim(),
-          format: selectedFormat || "bestvideo+bestaudio", // Use selected format or fall back to best combo
+          format: selectedFormat || undefined,
           downloadPath: downloadPath.trim() || undefined,
         }),
-        signal: abortControllerRef.current.signal,
       })
 
+      const data = await response.json()
+
       if (!response.ok) {
-        throw new Error("Download failed")
+        throw new Error(data.error || "Failed to add to queue")
       }
 
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        const chunk = decoder.decode(value)
-        const lines = chunk.split("\n").filter(line => line.trim())
-
-        for (const line of lines) {
-          try {
-            const data = JSON.parse(line)
-            
-            if (data.type === "progress") {
-              setProgress(data.progress)
-              setStatus(data.status)
-            } else if (data.type === "log") {
-              setLogs(prev => [...prev, data.message])
-            } else if (data.type === "complete") {
-              setStatus("Download completed!")
-              setIsDownloading(false)
-              // Reload files after successful download
-              loadFiles()
-            } else if (data.type === "error") {
-              setError(data.message)
-              setIsDownloading(false)
-            }
-          } catch (e) {
-            // Skip non-JSON lines
-          }
-        }
-      }
-    } catch (error) {
-      if (error.name === 'AbortError') {
-        setStatus("Download cancelled")
-        setLogs(prev => [...prev, "Download was cancelled by user"])
-      } else {
-        setError(error.message)
-      }
-      setIsDownloading(false)
+      setUrl("")
+      setSelectedFormat("")
+      await loadQueue()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setIsSubmitting(false)
     }
   }
 
-  const handleStopDownload = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort()
-      setStatus("Cancelling download...")
+  const handleCancelJob = async (jobId) => {
+    try {
+      await fetch(`/api/download/${jobId}`, { method: "DELETE" })
+      await loadQueue()
+    } catch (err) {
+      setError("Failed to cancel job")
     }
   }
 
-  const getProgressColor = (progress) => {
-    if (progress < 30) return "bg-blue-500"
-    if (progress < 70) return "bg-yellow-500"
-    return "bg-green-500"
+  const handleClearCompleted = async () => {
+    const completed = queue.filter((j) =>
+      ["completed", "failed", "cancelled"].includes(j.status)
+    )
+    await Promise.all(
+      completed.map((j) => fetch(`/api/download/${j.id}`, { method: "DELETE" }))
+    )
+    await loadQueue()
+  }
+
+  const getJobStatusBadge = (status) => {
+    const styles = {
+      queued: "bg-gray-100 text-gray-800",
+      downloading: "bg-blue-100 text-blue-800",
+      processing: "bg-yellow-100 text-yellow-800",
+      completed: "bg-green-100 text-green-800",
+      failed: "bg-red-100 text-red-800",
+      cancelled: "bg-orange-100 text-orange-800",
+    }
+    return styles[status] || "bg-gray-100 text-gray-800"
+  }
+
+  const getJobStatusIcon = (status) => {
+    switch (status) {
+      case "queued": return <Clock className="h-4 w-4" />
+      case "downloading": return <Loader2 className="h-4 w-4 animate-spin" />
+      case "processing": return <Loader2 className="h-4 w-4 animate-spin" />
+      case "completed": return <CheckCircle2 className="h-4 w-4" />
+      case "failed": return <XCircle className="h-4 w-4" />
+      case "cancelled": return <XCircle className="h-4 w-4" />
+      default: return <Clock className="h-4 w-4" />
+    }
+  }
+
+  const truncateUrl = (url, max = 60) => {
+    if (url.length <= max) return url
+    return url.slice(0, max) + "..."
   }
 
   const formatDate = (dateString) => {
@@ -243,23 +302,23 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-3 sm:p-4 md:p-6">
       <div className="max-w-4xl mx-auto">
         {/* Header with Logout */}
-        <div className="flex items-center justify-between mb-8">
-          <div className="text-center flex-1">
-            <h1 className="text-4xl font-bold text-gray-900 mb-2">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6 sm:mb-8">
+          <div className="text-center sm:text-left flex-1">
+            <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold text-gray-900 mb-2">
               Video Downloader
             </h1>
-            <p className="text-gray-600">
-              Download videos from YouTube and other social mediaplatforms with ease
+            <p className="text-sm sm:text-base text-gray-600">
+              Download videos from YouTube and other social media platforms with ease
             </p>
           </div>
           <Button
             onClick={handleLogout}
             variant="outline"
             size="sm"
-            className="ml-4"
+            className="self-center sm:self-start shrink-0"
           >
             <LogOut className="h-4 w-4 mr-2" />
             Logout
@@ -275,7 +334,7 @@ export default function Home() {
                 Download Video
               </CardTitle>
               <CardDescription>
-                Enter a URL and select your preferred format to start downloading
+                Enter a URL and add it to the download queue — downloads continue in the background
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -285,7 +344,7 @@ export default function Home() {
                   placeholder="https://www.youtube.com/watch?v=..."
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
-                  disabled={isDownloading}
+                  disabled={isSubmitting}
                 />
               </div>
 
@@ -293,7 +352,7 @@ export default function Home() {
                 <Button
                   onClick={checkFormats}
                   variant="outline"
-                  disabled={isCheckingFormats || isDownloading || !url.trim()}
+                  disabled={isCheckingFormats || isSubmitting || !url.trim()}
                   className="flex-1"
                 >
                   {isCheckingFormats ? (
@@ -311,7 +370,7 @@ export default function Home() {
               </div>
 
               {/* Selected Format Display */}
-              {selectedFormat && (
+              {selectedFormat ? (
                 <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
                   <div className="flex items-center justify-between">
                     <div>
@@ -327,6 +386,12 @@ export default function Home() {
                       <X className="h-4 w-4" />
                     </Button>
                   </div>
+                </div>
+              ) : (
+                <div className="p-3 bg-gray-50 border border-gray-200 rounded-lg">
+                  <p className="text-sm text-gray-600">
+                    No format selected — best available quality will be used automatically.
+                  </p>
                 </div>
               )}
 
@@ -355,7 +420,7 @@ export default function Home() {
                         placeholder="Leave empty for default"
                         value={downloadPath}
                         onChange={(e) => setDownloadPath(e.target.value)}
-                        disabled={isDownloading}
+                        disabled={isSubmitting}
                       />
                       <p className="text-xs text-gray-500">
                         Custom download directory path (relative to downloads folder)
@@ -365,70 +430,131 @@ export default function Home() {
                 )}
               </div>
 
-              <div className="flex gap-2">
+              <div className="flex flex-col sm:flex-row gap-2">
                 <Button
                   onClick={handleDownload}
-                  disabled={isDownloading || !url.trim()}
+                  disabled={isSubmitting || !url.trim()}
                   className="flex-1"
                   size="lg"
                 >
-                  {isDownloading ? (
+                  {isSubmitting ? (
                     <>
                       <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2" />
-                      Downloading...
+                      Adding...
                     </>
                   ) : (
                     <>
                       <Download className="h-4 w-4 mr-2" />
-                      Start Download
+                      Add to Queue
                     </>
                   )}
                 </Button>
-                
-                {isDownloading && (
-                  <Button
-                    onClick={handleStopDownload}
-                    variant="destructive"
-                    size="lg"
-                    className="px-6"
-                  >
-                    <Square className="h-4 w-4 mr-2" />
-                    Stop
-                  </Button>
-                )}
               </div>
             </CardContent>
           </Card>
 
-          {/* Progress Card */}
-          {isDownloading && (
+          {/* Download Queue */}
+          {queue.length > 0 && (
             <Card>
               <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Play className="h-5 w-5" />
-                  Download Progress
+                <CardTitle className="flex flex-col sm:flex-row sm:items-center gap-2">
+                  <span className="flex items-center gap-2">
+                    <ListOrdered className="h-5 w-5" />
+                    Download Queue
+                    {activeJobs.length > 0 && (
+                      <Badge variant="secondary">{activeJobs.length} active</Badge>
+                    )}
+                  </span>
+                  <div className="flex gap-2 sm:ml-auto">
+                    <Button onClick={loadQueue} variant="outline" size="sm">
+                      <RefreshCw className="h-4 w-4 mr-2" />
+                      Refresh
+                    </Button>
+                    {queue.some((j) => ["completed", "failed", "cancelled"].includes(j.status)) && (
+                      <Button onClick={handleClearCompleted} variant="outline" size="sm">
+                        Clear finished
+                      </Button>
+                    )}
+                  </div>
                 </CardTitle>
+                <CardDescription>
+                  Downloads run on the server — safe to close or refresh this page
+                </CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span>Progress</span>
-                    <span className="font-medium">{Math.round(progress)}%</span>
+              <CardContent className="space-y-3">
+                {queue.map((job) => (
+                  <div key={job.id} className="p-3 sm:p-4 bg-gray-50 rounded-lg space-y-2">
+                    <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-3">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-900 break-all">
+                          {truncateUrl(job.url)}
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2 mt-1">
+                          <Badge className={getJobStatusBadge(job.status)}>
+                            <span className="flex items-center gap-1">
+                              {getJobStatusIcon(job.status)}
+                              {job.status}
+                            </span>
+                          </Badge>
+                          <span className="text-xs text-gray-500">
+                            {formatDate(job.createdAt)}
+                          </span>
+                          {job.outputFile && (
+                            <span className="text-xs text-green-700">{job.outputFile}</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {["queued", "downloading", "processing"].includes(job.status) && (
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            onClick={() => handleCancelJob(job.id)}
+                          >
+                            <Square className="h-4 w-4" />
+                          </Button>
+                        )}
+                        {job.logs?.length > 0 && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setExpandedJobId(expandedJobId === job.id ? null : job.id)}
+                          >
+                            {expandedJobId === job.id ? (
+                              <ChevronUp className="h-4 w-4" />
+                            ) : (
+                              <ChevronDown className="h-4 w-4" />
+                            )}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+
+                    {["downloading", "processing"].includes(job.status) && (
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-xs text-gray-500">
+                          <span>{job.statusMessage}</span>
+                          <span>{Math.round(job.progress)}%</span>
+                        </div>
+                        <Progress value={job.progress} className="h-2" />
+                      </div>
+                    )}
+
+                    {job.error && (
+                      <p className="text-xs text-red-600">{job.error}</p>
+                    )}
+
+                    {expandedJobId === job.id && job.logs?.length > 0 && (
+                      <div className="max-h-32 overflow-y-auto space-y-1 pt-1">
+                        {job.logs.map((log, i) => (
+                          <div key={i} className="text-xs font-mono bg-gray-100 p-1.5 rounded">
+                            {log}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                  <div className="relative">
-                    <Progress 
-                      value={progress} 
-                      className="w-full h-3"
-                    />
-                    <div 
-                      className={`absolute top-0 left-0 h-3 rounded-full transition-all duration-300 ${getProgressColor(progress)}`}
-                      style={{ width: `${progress}%` }}
-                    />
-                  </div>
-                </div>
-                <div className="text-sm text-gray-600 bg-gray-50 p-2 rounded">
-                  {status || "Initializing download..."}
-                </div>
+                ))}
               </CardContent>
             </Card>
           )}
@@ -441,39 +567,20 @@ export default function Home() {
             </Alert>
           )}
 
-          {/* Logs Card */}
-          {logs.length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Settings className="h-5 w-5" />
-                  Download Logs
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="max-h-64 overflow-y-auto space-y-1">
-                  {logs.map((log, index) => (
-                    <div key={index} className="text-sm font-mono bg-gray-100 p-2 rounded">
-                      {log}
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
           {/* Downloaded Files Card */}
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <FileDown className="h-5 w-5" />
-                Downloaded Files
+              <CardTitle className="flex flex-col sm:flex-row sm:items-center gap-2">
+                <span className="flex items-center gap-2">
+                  <FileDown className="h-5 w-5" />
+                  Downloaded Files
+                </span>
                 <Button
                   onClick={loadFiles}
                   variant="outline"
                   size="sm"
                   disabled={isLoadingFiles}
-                  className="ml-auto"
+                  className="sm:ml-auto w-full sm:w-auto"
                 >
                   <RefreshCw className={`h-4 w-4 mr-2 ${isLoadingFiles ? 'animate-spin' : ''}`} />
                   Refresh
@@ -498,14 +605,14 @@ export default function Home() {
               ) : (
                 <div className="space-y-4">
                   {files.map((file, index) => (
-                    <div key={index} className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
+                    <div key={index} className="flex flex-col sm:flex-row sm:items-start gap-3 sm:gap-4 p-3 sm:p-4 bg-gray-50 rounded-lg">
                       {/* Thumbnail */}
                       {file.hasThumbnail && (
-                        <div className="flex-shrink-0">
+                        <div className="flex-shrink-0 mx-auto sm:mx-0">
                           <img
                             src={file.thumbnailUrl}
                             alt={`Thumbnail for ${file.name}`}
-                            className="w-24 h-16 object-cover rounded border"
+                            className="w-full sm:w-24 h-32 sm:h-16 object-cover rounded border"
                             onError={(e) => {
                               e.target.style.display = 'none'
                             }}
@@ -514,26 +621,35 @@ export default function Home() {
                       )}
                       
                       {/* File Info */}
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-900 truncate">
+                      <div className="flex-1 min-w-0 text-center sm:text-left">
+                        <p className="text-sm font-medium text-gray-900 break-all">
                           {file.name}
                         </p>
-                        <div className="flex items-center gap-4 text-xs text-gray-500 mt-1">
+                        <div className="flex flex-wrap items-center justify-center sm:justify-start gap-x-4 gap-y-1 text-xs text-gray-500 mt-1">
                           <span>{file.sizeFormatted}</span>
                           <span>{formatDate(file.modified)}</span>
                         </div>
                       </div>
                       
                       {/* Actions */}
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center justify-center sm:justify-end gap-2 shrink-0">
                         <Button
-                          asChild
                           size="sm"
+                          onClick={() => handleFileDownload(file)}
+                          disabled={downloadingFile === file.name}
+                          className="flex-1 sm:flex-none"
                         >
-                          <a href={file.url} download={file.name}>
-                            <Download className="h-4 w-4 mr-2" />
-                            Download
-                          </a>
+                          {downloadingFile === file.name ? (
+                            <>
+                              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2" />
+                              Downloading...
+                            </>
+                          ) : (
+                            <>
+                              <Download className="h-4 w-4 mr-2" />
+                              Download
+                            </>
+                          )}
                         </Button>
                         <Button
                           variant="destructive"
@@ -575,10 +691,10 @@ export default function Home() {
 
         {/* Format Selection Modal */}
         {showFormatModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-            <div className="bg-white rounded-lg max-w-4xl w-full max-h-[80vh] overflow-hidden">
-              <div className="flex items-center justify-between p-6 border-b">
-                <h2 className="text-xl font-semibold">Available Formats</h2>
+          <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50">
+            <div className="bg-white rounded-t-lg sm:rounded-lg max-w-4xl w-full max-h-[90vh] sm:max-h-[80vh] overflow-hidden">
+              <div className="flex items-center justify-between p-4 sm:p-6 border-b">
+                <h2 className="text-lg sm:text-xl font-semibold">Available Formats</h2>
                 <Button
                   variant="ghost"
                   size="sm"
@@ -587,7 +703,7 @@ export default function Home() {
                   <X className="h-4 w-4" />
                 </Button>
               </div>
-              <div className="p-6 overflow-y-auto max-h-[60vh]">
+              <div className="p-4 sm:p-6 overflow-y-auto max-h-[55vh] sm:max-h-[60vh]">
                 {availableFormats.length === 0 ? (
                   <div className="text-center py-8 text-gray-500">
                     <p>No formats found for this URL</p>
@@ -597,11 +713,11 @@ export default function Home() {
                     {availableFormats.map((format, index) => (
                       <div
                         key={index}
-                        className="flex items-center justify-between p-3 border rounded-lg hover:bg-gray-50 cursor-pointer"
+                        className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 border rounded-lg hover:bg-gray-50 cursor-pointer"
                         onClick={() => selectFormat(format.id)}
                       >
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-1">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2 mb-1">
                             <Badge className={getQualityBadge(format.resolution)}>
                               {format.resolution}
                             </Badge>
@@ -615,7 +731,7 @@ export default function Home() {
                             {format.tbr !== "N/A" && <span>Bitrate: {format.tbr}</span>}
                           </div>
                         </div>
-                        <Button size="sm" variant="outline">
+                        <Button size="sm" variant="outline" className="self-end sm:self-auto">
                           Select
                         </Button>
                       </div>
@@ -623,9 +739,9 @@ export default function Home() {
                   </div>
                 )}
               </div>
-              <div className="p-6 border-t bg-gray-50">
+              <div className="p-4 sm:p-6 border-t bg-gray-50">
                 <p className="text-sm text-gray-600">
-                  Click on any format to select it for download. If no format is selected, the best audio-video combination will be used.
+                  Click on any format to select it for download. If no format is selected, the best available quality will be used automatically.
                 </p>
               </div>
             </div>

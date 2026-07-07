@@ -1,63 +1,67 @@
 import { NextResponse } from "next/server"
 import fs from "fs"
 import path from "path"
+import { Readable } from "stream"
+
+const MIME_TYPES = {
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+}
 
 export async function GET(request, { params }) {
   try {
-    // Check authentication
     const authCookie = request.cookies.get("yt-dlp-auth")
-    const isAuthenticated = authCookie?.value === "authenticated"
-    
-    if (!isAuthenticated) {
+    if (authCookie?.value !== "authenticated") {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    const { filename } = params
-    const filePath = path.join(process.cwd(), "public", "thumbnails", ...filename)
-    
-    // Security check: ensure the file is within the thumbnails directory
+    const { filename: filenameParts } = await params
+    const filename = Array.isArray(filenameParts)
+      ? filenameParts.map(decodeURIComponent).join("/")
+      : decodeURIComponent(filenameParts || "")
+
+    if (!filename) {
+      return NextResponse.json({ error: "Filename is required" }, { status: 400 })
+    }
+
     const thumbnailsDir = path.join(process.cwd(), "public", "thumbnails")
+    const filePath = path.join(thumbnailsDir, filename)
+
     const resolvedFilePath = path.resolve(filePath)
     const resolvedThumbnailsDir = path.resolve(thumbnailsDir)
-    
-    if (!resolvedFilePath.startsWith(resolvedThumbnailsDir)) {
+
+    if (!resolvedFilePath.startsWith(resolvedThumbnailsDir + path.sep) &&
+        resolvedFilePath !== resolvedThumbnailsDir) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 })
     }
-    
-    if (!fs.existsSync(filePath)) {
+
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
       return NextResponse.json({ error: "File not found" }, { status: 404 })
     }
-    
-    const fileBuffer = fs.readFileSync(filePath)
+
     const fileStats = fs.statSync(filePath)
-    
-    // Determine content type based on file extension
     const ext = path.extname(filePath).toLowerCase()
-    let contentType = "image/jpeg" // Default for thumbnails
-    
-    if (ext === ".png") {
-      contentType = "image/png"
-    } else if (ext === ".gif") {
-      contentType = "image/gif"
-    } else if (ext === ".webp") {
-      contentType = "image/webp"
-    }
-    
-    const response = new NextResponse(fileBuffer, {
+    const contentType = MIME_TYPES[ext] || "image/jpeg"
+
+    const nodeStream = fs.createReadStream(filePath)
+    const webStream = Readable.toWeb(nodeStream)
+
+    return new NextResponse(webStream, {
       status: 200,
       headers: {
         "Content-Type": contentType,
         "Content-Length": fileStats.size.toString(),
-        "Content-Disposition": `inline; filename="${encodeURIComponent(path.basename(filePath))}"`,
-        "Cache-Control": "public, max-age=31536000", // Cache for 1 year
+        "Content-Disposition": `inline; filename="${path.basename(filePath)}"`,
+        "Cache-Control": "public, max-age=31536000",
       },
     })
-    
-    return response
   } catch (error) {
     return NextResponse.json(
       { error: `Failed to serve thumbnail: ${error.message}` },
       { status: 500 }
     )
   }
-} 
+}
